@@ -1,0 +1,1377 @@
+
+---
+title: "Analysis Slow-growing - FPL"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+library(sparklyr)
+
+# create a sparklyr connection
+sc <- spark_connect(method = "databricks")
+```
+
+
+```{r}
+%scala
+spark.sparkContext.hadoopConfiguration.set(
+  "<directory>",
+  "<key>"
+)
+```
+
+
+```{r}
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Palette2 <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Palette3 <- c("#E69F00","#7ac9f5","#017858")
+Palette4 <- c("#de8500","#83caf2","#006349") # suitable for color, black-white and color blindness
+Palette5 <- c('#000000','#f58231',"#4363d8") # suitable for color, black-white and color blindness
+```
+
+
+```{r}
+dfFinalDataset <- spark_read_csv(sc,
+                                 "wasbs://decide@decide.blob.core.windows.net/poultry/nl/data_avinet/dfFinalDataset.csv",
+                                 memory = FALSE,
+                                 header = TRUE)
+```
+
+
+```{r}
+AnalysisData <- dfFinalDataset %>%
+  dplyr::select(
+    FarmIdentification, 
+    Pen, 
+    Flock, 
+    VetId,
+    FootpadLesions,
+    Antibiotics,
+    AntibioticsWeek1,
+    AntibioticsAfterWeek1,
+    NumberOfHouses,
+    Type,
+    Breed,
+    Patio,
+    HatchYear,
+    SlaughterDate,
+    SlaughterQuarter,
+    Slaughterhouse,
+    Thinning,
+    EndFlockSize,
+    PoultryFarmDensity,
+    MeanAgeAtSlaughter
+  ) %>%
+  collect() %>%
+  dplyr::filter(
+    Type != "free range and organic",
+    Patio == 0,
+    HatchYear >= 2017,
+    ) %>%
+  dplyr::mutate(
+    Farm = factor(FarmIdentification),
+    House = factor(Pen),
+    Flock = factor(Flock),
+    Vet = factor(VetId),
+    Slaughterhouse = factor(Slaughterhouse),
+    FlockSizeGroup = cut(EndFlockSize, breaks = c(0, 18000, 29000, 100000), labels = c("<18000", "18000-29000", ">29000"), include.lowest = TRUE),
+    NumberOfHousesGroup = cut(NumberOfHouses, breaks = c(0, 1.1, 2.1, 3.1, 100), labels = c("1", "2", "3", ">3"), include.lowest = TRUE),
+    SlaughterDate = as.Date(SlaughterDate),
+    SlaughterYear = factor(format(SlaughterDate, format="%Y")),
+    Year_Quarter = factor(paste0(as.character(SlaughterYear), "-", SlaughterQuarter)),
+    SlaughterQuarter = factor(SlaughterQuarter),
+    logFlockSize = log(EndFlockSize),
+    EndFlockSize_scaled = scale(EndFlockSize),
+    PoultryFarmDensity_scaled = scale(PoultryFarmDensity),
+    BreedGroup = car::recode(Breed, "c('cobb byproduct', 'cobb avian', 'hubbard conventional', 'ross 708', 'ross pm3')='other FG'"),
+    FootpadLesions = dplyr::na_if(FootpadLesions, 0)
+  ) %>%
+  na.omit()
+```
+
+
+```{r}
+%md
+# Descriptive statistics
+```
+
+
+```{r}
+Slow = AnalysisData %>% dplyr::filter(Type == 'slow-growing')
+Med = AnalysisData %>% dplyr::filter(Type == 'medium')
+Conv = AnalysisData %>% dplyr::filter(Type == 'conventional')
+```
+
+
+```{r}
+prop.table(table(AnalysisData$Type, AnalysisData$Thinning), m =1)
+```
+
+
+```{r}
+AnalysisData %>% dplyr::group_by(Type) %>% dplyr::summarize(n = dplyr::n_distinct(FarmIdentification))
+```
+
+
+```{r}
+FPLFlocks = AnalysisData %>% dplyr::group_by(Type, SlaughterYear) %>% dplyr::summarize(FPL = dplyr::n())
+FPLFlocks = as.data.frame(FPLFlocks)
+FPLFlocks
+```
+
+
+```{r}
+total = dfFinalDataset %>%
+  dplyr::select(
+    FarmIdentification, 
+    Pen, 
+    Flock, 
+    VetId,
+    Antibiotics,
+    AntibioticsWeek1,
+    AntibioticsAfterWeek1,
+    NumberOfHouses,
+    Type,
+    Breed,
+    Patio,
+    HatchYear,
+    SlaughterDate,
+    SlaughterQuarter,
+    Thinning,
+    EndFlockSize,
+    PoultryFarmDensity,
+    MeanAgeAtSlaughter
+  ) %>%
+  collect() %>%
+  dplyr::filter(
+    Type != "free range and organic",
+    Patio == 0,
+    HatchYear >= 2017,
+    ) %>%
+  na.omit() %>%
+  dplyr::mutate(SlaughterYear = factor(format(SlaughterDate, format="%Y"))) %>%
+  dplyr::group_by(Type, SlaughterYear) %>% dplyr::summarize(tot = dplyr::n())
+
+total = as.data.frame(total)
+total = total %>% 
+  dplyr::inner_join(FPLFlocks, by = c("Type", "SlaughterYear")) %>%
+  mutate(fraction = FPL/tot)
+total
+```
+
+
+```{r}
+AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(FootpadLesions, prob=c(.25)),
+                   median = quantile(FootpadLesions, prob=c(.5)),
+                   Q3 = quantile(FootpadLesions, prob=c(.75)))
+```
+
+
+```{r}
+par(mfrow = c(1,3))
+hist(Slow$FootpadLesions)
+hist(Med$FootpadLesions)
+hist(Conv$FootpadLesions)
+```
+
+
+```{r}
+par(mfrow = c(2,2))
+hist(Conv$FootpadLesions)
+hist(Conv$FootpadLesions, breaks = 200)
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+hist(Med$FootpadLesions, breaks = 200)
+hist(Conv$FootpadLesions, breaks = 200)
+```
+
+
+```{r}
+AnalysisData %>%
+    ggplot2::ggplot(ggplot2::aes(x = factor(Year_Quarter), y = FootpadLesions, group = Type, color = Type)) +
+    ggplot2::stat_summary(geom = "line", fun = "mean", size = 2) + 
+    ggplot2::labs(
+        x = "Year-Quarter", 
+        y="Footpad lesion score"
+    ) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5, size = 18),
+      axis.title.x = ggplot2::element_text(size = 15),
+      axis.text= ggplot2::element_text(size=15),
+      axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+      axis.title.y = ggplot2::element_text(size = 15),
+      legend.position = c(0.2, 0.4),
+      legend.title = ggplot2::element_text(size=0),
+      legend.text = ggplot2::element_text(size=15)
+    ) +
+    ggplot2::labs(color = "the legend")
+```
+
+
+```{r}
+#+++++++++++++++++++++++++
+# Function to calculate the median and IQR (FOR PROPORTION!)
+  # for each group
+#+++++++++++++++++++++++++
+# data : a data frame
+# varname : the name of a column containing the variable to be summarized
+# groupnames : vector of column names to be used as grouping variables
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(median = median(x[[col]], na.rm=TRUE),
+      Q1 = as.numeric(quantile(x[[col]], prob=c(.25))),
+      Q3 = as.numeric(quantile(x[[col]], prob=c(.75)))
+      )
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("median" = varname))
+ return(data_sum)
+}
+
+FPL_sum <- data_summary(AnalysisData, varname="FootpadLesions", 
+                    groupnames=c("Type", "SlaughterYear"))
+
+FPL_sum
+```
+
+
+```{r}
+plot_box <- ggplot2::ggplot(
+  data = AnalysisData,
+  ggplot2::aes(x = factor(SlaughterYear), y = FootpadLesions, fill = Type)
+  ) +
+ggplot2::geom_boxplot(
+  outlier.shape = NA,
+  size = 0.7
+) +
+ggplot2::labs(
+        x = "Year", 
+        y="FPL score"
+    ) +
+ggplot2::theme_classic() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 15, hjust = 0.5),
+      axis.title.x = ggplot2::element_text(size = 0),
+      axis.text= ggplot2::element_text(size= 15),,
+      axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+      axis.title.y = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_text(size=0),
+      legend.text = ggplot2::element_text(size=12),
+      legend.position = c(0.8, 0.9)
+    ) +
+ggplot2::scale_fill_manual(values = c('dark grey','#f58231',"#4363d8"), labels=c('CONV', 'MED', 'SLOW')) 
+
+gridExtra::grid.arrange(plot_box, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+%md
+## Preliminary analyses
+```
+
+
+```{r}
+par(mfrow = c(2,2))
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$Antibiotics)
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$Type)
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$NumberOfHousesGroup)
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$SlaughterQuarter)
+```
+
+
+```{r}
+par(mfrow = c(2,1))
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$Vet)
+boxplot(AnalysisData$FootpadLesions ~ AnalysisData$Slaughterhouse)
+```
+
+
+```{r}
+prop.table(table(AnalysisData$SlaughterQuarter, AnalysisData$Type), m = 2)
+```
+
+
+```{r}
+NumVar <- AnalysisData %>%
+  select(        
+    'PoultryFarmDensity',
+    'NumberOfHouses',
+    'EndFlockSize',
+    'MeanAgeAtSlaughter'
+  )
+
+round(cor(NumVar),2)
+```
+
+
+```{r}
+%md
+## Univariate analyses
+```
+
+
+```{r}
+model0 = glmmTMB::glmmTMB(FootpadLesions ~ 1 + (1|Farm) + (1|Vet),
+                 data = AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+```
+
+
+```{r}
+# All variables are used in backwards selection
+
+Vars = as.list(c(
+                "NumberOfHouses",
+                "Type",
+                "BreedGroup",
+                "OnFarmHatching",
+                "SlaughterYear",
+                "SlaughterQuarter",
+                "Thinning",
+                "EndFlockSize_scaled",
+                "log(EndFlockSize)",
+                "PoultryFarmDensity_scaled",
+                "NumberOfHousesGroup",
+                "Antibiotics"
+))
+
+allModelsList = lapply(paste("TotalDead ~", Vars, "+ offset(log(StartFlockSize)) + (1|Farm) + (1|Vet)"), as.formula)
+allModelsResults = lapply(allModelsList, 
+                          function(x) glmmTMB::glmmTMB(x, 
+                                                       data = AnalysisData,
+                                                       family = glmmTMB::nbinom2,
+                                                       control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                                                      )
+                          )
+allModelsAIC = lapply(allModelsResults, AIC)
+```
+
+
+```{r}
+# to compare log values:
+
+Vars = as.list(c(
+                "EndFlockSize_scaled",
+                "log(FlockSize)"
+))
+
+allModelsList = lapply(paste("FootpadLesions ~", Vars, " + (1|Farm) + (1|Vet)"), as.formula)
+allModelsResults = lapply(allModelsList, 
+                          function(x) glmmTMB::glmmTMB(x, 
+                                                       data = AnalysisData,
+                                                       family = glmmTMB::nbinom2,
+                                                       control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                                                      )
+                          )
+allModelsAIC = lapply(allModelsResults, AIC)
+```
+
+
+```{r}
+allModelsDeltaAIC = lapply(allModelsAIC, function(x) round(x - AIC(model0)))
+
+DeltaAICDf = as.data.frame(do.call(rbind, allModelsDeltaAIC))
+colnames(DeltaAICDf)[1] = "DeltaAIC"
+
+VarsDf = as.data.frame(do.call(rbind, Vars))
+colnames(VarsDf)[1] = "Variable"
+
+CompleteDf = cbind(VarsDf, DeltaAICDf)
+CompleteDf = CompleteDf[order(CompleteDf$DeltaAIC),]
+CompleteDf$Variable <- factor(CompleteDf$Variable, levels = CompleteDf$Variable)                          
+CompleteDf
+```
+
+
+```{r}
+model1.1 = glmmTMB::glmmTMB(TotalDead ~ BreedGroup + offset(log(StartFlockSize)) + (1|Farm) + (1|Vet),
+                 data = AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+```
+
+
+```{r}
+model1.2 = glmmTMB::glmmTMB(FootpadLesions ~ Type + (1|Farm) + (1|Vet),
+                 data = AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(model1.2, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+%md
+# Backwards stepwise selection with Type
+```
+
+
+```{r}
+model2_1 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         PoultryFarmDensity_scaled +
+                         (1|Farm) + (1|Vet), 
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+drop1(model2_1)
+```
+
+
+```{r}
+model2_2 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         (1|Farm) + (1|Vet), 
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+drop1(model2_2, test = "Chisq")
+```
+
+
+```{r}
+summary(model2_2)
+```
+
+
+```{r}
+%md
+# Test interactions
+```
+
+
+```{r}
+model3_1 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         SlaughterYear * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+Model_fpl = model3_1
+save(Model_fpl, file = "Model_fpl.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/Model_fpl.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+AnalysisData_with0 <- dfFinalDataset %>%
+  dplyr::select(
+    FarmIdentification, 
+    Pen, 
+    Flock, 
+    VetId,
+    FootpadLesions,
+    Antibiotics,
+    AntibioticsWeek1,
+    AntibioticsAfterWeek1,
+    NumberOfHouses,
+    Type,
+    Breed,
+    Patio,
+    HatchYear,
+    SlaughterDate,
+    SlaughterQuarter,
+    Slaughterhouse,
+    Thinning,
+    EndFlockSize,
+    PoultryFarmDensity,
+    MeanAgeAtSlaughter
+  ) %>%
+  collect() %>%
+  dplyr::filter(
+    Type != "free range and organic",
+    Patio == 0,
+    HatchYear >= 2017,
+    ) %>%
+  na.omit() %>%
+  dplyr::mutate(
+    Farm = factor(FarmIdentification),
+    House = factor(Pen),
+    Flock = factor(Flock),
+    Vet = factor(VetId),
+    SlaughterHouse = factor(Slaughterhouse),
+    FlockSizeGroup = cut(EndFlockSize, breaks = c(0, 18000, 29000, 100000), labels = c("<18000", "18000-29000", ">29000"), include.lowest = TRUE),
+    NumberOfHousesGroup = cut(NumberOfHouses, breaks = c(0, 1.1, 2.1, 3.1, 100), labels = c("1", "2", "3", ">3"), include.lowest = TRUE),
+    SlaughterDate = as.Date(SlaughterDate),
+    SlaughterYear = factor(format(SlaughterDate, format="%Y")),
+    Year_Quarter = factor(paste0(as.character(SlaughterYear), "-", SlaughterQuarter)),
+    SlaughterQuarter = factor(SlaughterQuarter),
+    logFlockSize = log(EndFlockSize),
+    EndFlockSize_scaled = scale(EndFlockSize),
+    PoultryFarmDensity_scaled = scale(PoultryFarmDensity)
+  )
+```
+
+
+```{r}
+nrow(AnalysisData_with0)
+```
+
+
+```{r}
+FPL_sum <- data_summary(AnalysisData_with0, varname="FootpadLesions", 
+                    groupnames=c("Type", "SlaughterYear"))
+
+plot_box <- ggplot2::ggplot(
+  data = AnalysisData_with0,
+  ggplot2::aes(x = factor(SlaughterYear), y = FootpadLesions, fill = Type)
+  ) +
+ggplot2::geom_boxplot(
+  outlier.shape = NA,
+  size = 0.7
+) +
+ggplot2::labs(
+        x = "Year", 
+        y="FPL score"
+    ) +
+ggplot2::theme_classic() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 15, hjust = 0.5),
+      axis.title.x = ggplot2::element_text(size = 0),
+      axis.text= ggplot2::element_text(size= 15),,
+      axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+      axis.title.y = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_text(size=0),
+      legend.text = ggplot2::element_text(size=12),
+      legend.position = c(0.8, 0.9)
+    ) +
+ggplot2::scale_fill_manual(values = c('dark grey','#f58231',"#4363d8"), labels=c('CONV', 'MED', 'SLOW')) 
+
+gridExtra::grid.arrange(plot_box, ncol = 2, respect = TRUE)                    
+```
+
+
+```{r}
+model3_1_with0 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         SlaughterYear * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData_with0,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+Model_fpl_with0 = model3_1_with0
+save(Model_fpl_with0, file = "Model_fpl_with0.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/Model_fpl_with0.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+model3_2 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         SlaughterYear * Type +
+                         EndFlockSize_scaled * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+AIC(model3_2)
+```
+
+
+```{r}
+model3_3 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         SlaughterYear * Type +
+                         EndFlockSize_scaled * Type +
+                         Thinning * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+AIC(model3_3)
+```
+
+
+```{r}
+FinalModel_fpl = model3_3
+save(FinalModel_fpl, file = "FinalModel_fpl.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/FinalModel_fpl.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+%md
+# Results: with vs without 0 scores
+```
+
+
+```{r}
+summary(Model_fpl)
+```
+
+
+```{r}
+summary(Model_fpl_with0)
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl_with0, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl, trt.vs.ctrl ~ SlaughterYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl_with0, trt.vs.ctrl ~ SlaughterYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl, revpairwise ~ Thinning, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl_with0, revpairwise ~ Thinning, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl, revpairwise ~ SlaughterQuarter, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl_with0, revpairwise ~ SlaughterQuarter, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl, revpairwise ~ NumberOfHousesGroup, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(Model_fpl_with0, revpairwise ~ NumberOfHousesGroup, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+exp(confint(Model_fpl, method = "Wald"))
+```
+
+
+```{r}
+exp(confint(Model_fpl_with0, method = "Wald"))
+```
+
+
+```{r}
+%md
+# Results: best model
+```
+
+
+```{r}
+dbutils.fs.cp ("dbfs:/tmp/FinalModel_fpl.rda", paste("file:", getwd(), sep=""))
+```
+
+
+```{r}
+load(file = paste(getwd(),"/FinalModel_fpl.rda", sep=""))
+```
+
+
+```{r}
+summary(FinalModel_fpl)
+```
+
+
+```{r}
+# rate ratios:
+ls = lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ Thinning|Type, type = "response")
+summary(ls, infer = TRUE)$contrast
+```
+
+
+```{r}
+# rate ratios:
+ls = lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ Type|SlaughterYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls_type = lsmeans::lsmeans(FinalModel_fpl, ~ Type | SlaughterYear)
+
+ls_type_cld <- multcomp::cld(object = ls_type,
+                       adjust = "Tukey",
+                       Letters = letters,
+                       alpha = 0.05,
+                       type = "response",
+                       decreasing = TRUE)
+
+# show output
+ls_type_cld
+```
+
+
+```{r}
+plot2 <- ls_type_cld %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = factor(SlaughterYear), y = response, group = Type, color = Type)
+  ) +
+  ggplot2::geom_line(
+    linewidth = 1
+  ) +  
+  ggplot2::geom_point(
+    ggplot2::aes(shape = Type),
+    size = 3
+  ) +  
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+    width=.5,
+    position = ggplot2::position_dodge(0.1)
+  ) +
+  # add significance letters per type to allow different positions:
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='conventional',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.2),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1.5),
+    position = ggplot2::position_nudge(x = -0.2),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.8),
+    position = ggplot2::position_nudge(x = -0.2),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.7),
+    position = ggplot2::position_nudge(x = 0.2),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  # one letter at 2019 who doesn't fit:
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.2),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::labs(
+      y="Footpad lesion score"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 0),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=15),
+    axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position = c(0.85, 0.85)
+  ) +
+  ggplot2::scale_color_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_shape_manual(values = c(16,15,17), labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_fill_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW'))
+```
+
+
+```{r}
+plot2_r <- ls_type_cld %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = factor(SlaughterYear), y = response, group = Type, color = Type)
+  ) +
+  ggplot2::geom_line(
+    linewidth = 1
+  ) +  
+  ggplot2::geom_point(
+    ggplot2::aes(shape = Type),
+    size = 3
+  ) +  
+  ggplot2::geom_ribbon(
+    ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = Type), 
+    alpha = .2, 
+    color = NA
+  ) +
+  # add significance letters per type to allow different positions:
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='conventional',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.00),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.8),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  # one letter at 2019 who doesn't fit:
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::labs(
+      y="Footpad lesion score"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 0),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=15),
+    axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position = c(0.9, 0.85)
+  ) +
+  ggplot2::scale_color_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_shape_manual(values = c(16,15,17), labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_fill_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_y_continuous(limits = c(0, NA))
+```
+
+
+```{r}
+gridExtra::grid.arrange(plot2_r, plot2, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+ls_type = lsmeans::lsmeans(Model_fpl, ~ Type | SlaughterYear)
+
+ls_type_cld <- multcomp::cld(object = ls_type,
+                       adjust = "Tukey",
+                       Letters = letters,
+                       alpha = 0.05,
+                       type = "response",
+                       decreasing = TRUE)
+
+ls_type_with0 = lsmeans::lsmeans(Model_fpl_with0, ~ Type | SlaughterYear)
+
+ls_type_cld_with0 <- multcomp::cld(object = ls_type_with0,
+                       adjust = "Tukey",
+                       Letters = letters,
+                       alpha = 0.05,
+                       type = "response",
+                       decreasing = TRUE)        
+
+plot1 <- ls_type_cld %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = factor(SlaughterYear), y = response, group = Type, color = Type)
+  ) +
+  ggplot2::geom_line(
+    linewidth = 1
+  ) +  
+  ggplot2::geom_point(
+    ggplot2::aes(shape = Type),
+    size = 3
+  ) +  
+  ggplot2::geom_ribbon(
+    ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = Type), 
+    alpha = .2, 
+    color = NA
+  ) +
+  # add significance letters per type to allow different positions:
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='conventional',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.00),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='medium' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.8),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  # one letter at 2019 who doesn't fit:
+  ggplot2::geom_text(
+    data=ls_type_cld[(ls_type_cld$Type=='slow-growing' & ls_type_cld$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::labs(
+      y="Footpad lesion score"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 0),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=15),
+    axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position = c(0.9, 0.85)
+  ) +
+  ggplot2::scale_color_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_shape_manual(values = c(16,15,17), labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_fill_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_y_continuous(limits = c(0, NA))
+
+
+
+plot2 <- ls_type_cld_with0 %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = factor(SlaughterYear), y = response, group = Type, color = Type)
+  ) +
+  ggplot2::geom_line(
+    linewidth = 1
+  ) +  
+  ggplot2::geom_point(
+    ggplot2::aes(shape = Type),
+    size = 3
+  ) +  
+  ggplot2::geom_ribbon(
+    ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = Type), 
+    alpha = .2, 
+    color = NA
+  ) +
+  # add significance letters per type to allow different positions:
+  ggplot2::geom_text(
+    data=ls_type_cld_with0[ls_type_cld_with0$Type=='conventional',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.00),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld_with0[(ls_type_cld_with0$Type=='medium' & ls_type_cld_with0$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld_with0[(ls_type_cld_with0$Type=='medium' & ls_type_cld_with0$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.8),
+    position = ggplot2::position_nudge(x = -0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld_with0[(ls_type_cld_with0$Type=='slow-growing' & ls_type_cld_with0$SlaughterYear != '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  # one letter at 2019 who doesn't fit:
+  ggplot2::geom_text(
+    data=ls_type_cld_with0[(ls_type_cld_with0$Type=='slow-growing' & ls_type_cld_with0$SlaughterYear == '2019'),],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0),  
+    size = 4,
+    show.legend = FALSE
+  ) +
+  ggplot2::labs(
+      y="Footpad lesion score"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 0),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=15),
+    axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position = c(0.9, 0.85)
+  ) +
+  ggplot2::scale_color_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_shape_manual(values = c(16,15,17), labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_fill_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_y_continuous(limits = c(0, NA))
+
+  gridExtra::grid.arrange(plot1, plot2, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_fpl, trt.vs.ctrl ~ SlaughterYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ SlaughterQuarter, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+lsmeans_quarter <- lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ SlaughterQuarter)
+quarter_sum <- summary(lsmeans_quarter, type = "response")[[1]]   # results are on response scale: probs, se, LCL, UCL
+
+plotQuarter <- quarter_sum %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(SlaughterQuarter), y = response)) +
+  ggplot2::geom_bar(stat="identity",
+                   position = "dodge",
+                   fill = "#0D4678",
+                   alpha = 0.6) +  
+  ggplot2::geom_errorbar(ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+                         width=.2, 
+                         position = ggplot2::position_dodge(.9)) +
+  ggplot2::labs(
+      y="Footpad lesion score",
+      x= "Quarter of slaughter"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::scale_y_continuous(limits = c(0, 60)) +
+  ggplot2::theme(
+      axis.title.x = ggplot2::element_text(size = 15),
+      axis.text= ggplot2::element_text(size=15),
+      axis.title.y = ggplot2::element_text(size = 15)
+  )
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ NumberOfHousesGroup, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+emmeans::emtrends(FinalModel_fpl, pairwise ~ Type, var = "EndFlockSize_scaled", infer = TRUE)
+```
+
+
+```{r}
+lsmeans_house <- lsmeans::lsmeans(FinalModel_fpl, revpairwise ~ NumberOfHousesGroup)
+house_sum <- summary(lsmeans_house, type = "response")[[1]]   # results are on response scale: probs, se, LCL, UCL
+
+plotHouses <- house_sum %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(NumberOfHousesGroup), y = response)) +
+  ggplot2::geom_bar(stat="identity",
+                   fill = "#0D4678",
+                   position = "dodge",
+                   alpha = 0.6) +  
+  ggplot2::geom_errorbar(ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+                         width=.2, 
+                         position = ggplot2::position_dodge(.9)) +
+  ggplot2::labs(
+      y="Footpad lesion score",
+      x= "Number of houses"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::scale_y_continuous(limits = c(0, 60)) +
+  ggplot2::theme(
+      axis.title.x = ggplot2::element_text(size = 15),
+      axis.text= ggplot2::element_text(size=15),
+      axis.title.y = ggplot2::element_text(size = 15)
+  )
+
+gridExtra::grid.arrange(plotQuarter, plotHouses, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+%md
+# Relationship between FPL and AMU
+```
+
+
+```{r}
+model4_1 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         Antibiotics +
+                         SlaughterYear * Type +
+                         EndFlockSize_scaled * Type +
+                         Thinning * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+model4_2 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         Antibiotics +
+                         Antibiotics * Type +
+                         SlaughterYear * Type +
+                         EndFlockSize_scaled * Type +
+                         Thinning * Type +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+model4_3 = glmmTMB::glmmTMB(FootpadLesions ~ 
+                         Type +
+                         SlaughterYear +
+                         SlaughterQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         EndFlockSize_scaled +
+                         Antibiotics +
+                         Antibiotics * Type * SlaughterYear +
+                         (1|Farm) + (1|Vet) + (1|Slaughterhouse),
+                         data = AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+AIC(model4_1)
+```
+
+
+```{r}
+AIC(model4_2)
+```
+
+
+```{r}
+AIC(model4_3)
+```
+
+
+```{r}
+save(model4_2, file = "model4_2.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/model4_2.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+dbutils.fs.cp ("dbfs:/tmp/model4_2.rda", paste("file:", getwd(), sep=""))
+```
+
+
+```{r}
+load(file = paste(getwd(),"/model4_2.rda", sep=""))
+```
+
+
+```{r}
+lsmeans_ab <- lsmeans::lsmeans(model4_2, revpairwise ~ Antibiotics|Type)
+summary(lsmeans_ab, infer = TRUE, type = "response")  
+```
+
+
+```{r}
+summary(lsmeans_ab)
+```
+
+
+```{r}
+lsmeans_ab <- lsmeans::lsmeans(model4_2, revpairwise ~ Antibiotics|Type, infer = TRUE)
+
+p_values <- summary(lsmeans_ab$contrasts)$p.value
+group_labels <- summary(lsmeans_ab$contrasts)$contrast
+alpha <- 0.05
+
+# Identify significant comparisons based on p-values
+significant_comparisons <- group_labels[p_values < alpha]
+
+ab_sum <- summary(lsmeans_ab, type = "response")[[1]]   # results are on response scale: probs, se, LCL, UCL
+
+plot_bar <- ab_sum %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(Type), y = response, group = factor(Antibiotics), fill = factor(Antibiotics))) +
+  ggplot2::geom_bar(
+    stat="identity",
+    position = "dodge"
+  ) +  
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+    width=.3, 
+    position = ggplot2::position_dodge(.9)
+  ) +
+  ggplot2::labs(
+      y="Footpad lesion score"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+      axis.title.x = ggplot2::element_text(size = 0),
+      axis.text= ggplot2::element_text(size=15),
+      axis.title.y = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_text(size=0),
+      legend.text = ggplot2::element_text(size=12),
+      legend.position = c(0.8, 0.9)
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("#83caf2","#006349"), 
+    labels = c('Not treated', 'Treated')
+  ) +
+  ggplot2::scale_x_discrete(
+    labels = c('CONV','MED','SLOW')
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0,60)
+  ) +
+  ggsignif::geom_signif(
+    y_position = c(58, 30), xmin = c(0.75, 1.75), xmax = c(1.25, 2.25),
+    annotation= c("***", "***"),
+    tip_length = 0
+  )
+
+  gridExtra::grid.arrange(plot_bar, ncol = 2, respect = TRUE)
+```
+

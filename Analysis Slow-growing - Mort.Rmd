@@ -1,0 +1,924 @@
+
+---
+title: "Analysis Slow-growing - Mort"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+library(sparklyr)
+
+# create a sparklyr connection
+sc <- spark_connect(method = "databricks")
+```
+
+
+```{r}
+%scala
+spark.sparkContext.hadoopConfiguration.set(
+  "<directory>",
+  "<key>"
+)
+```
+
+
+```{r}
+#lme4 doet het niet meer.
+
+#plan:
+# 1) rlang in libary laden (enige manier om de nieuwste versie te krijgen)
+# install matrix version 1.6.2 NIET op cluster (hopen dat dit werkt)
+# install lme4 (latest version) NIET op cluster
+
+# You need to download the package into the cluster (outside of the notebook) to have rlang work
+```
+
+
+```{r}
+dfFinalDataset <- spark_read_csv(sc,
+                                 "wasbs://decide@decide.blob.core.windows.net/poultry/nl/data_avinet/dfFinalDataset.csv",
+                                 memory = FALSE,
+                                 header = TRUE)
+```
+
+
+```{r}
+m_AnalysisData <- dfFinalDataset %>%
+  dplyr::select(
+    FarmIdentification, 
+    Pen, 
+    Flock, 
+    VetId,
+    Mortality,
+    Antibiotics,
+    AntibioticsWeek1,
+    AntibioticsAfterWeek1,
+    NumberOfHouses,
+    Type,
+    Patio,
+    OnFarmHatching,
+    HatchYear,
+    HatchQuarter,
+    Thinning,
+    EndFlockSize,
+    PoultryFarmDensity,
+    MeanAgeAtSlaughter
+  ) %>%
+  collect() %>%
+  dplyr::filter(
+    Type != "free range and organic",
+    Patio == 0,
+    HatchYear >= 2017
+    ) %>%
+  na.omit() %>%
+  dplyr::mutate(
+    Farm = factor(FarmIdentification),
+    House = factor(Pen),
+    Flock = factor(Flock),
+    Vet = factor(VetId),
+    FlockSizeGroup = cut(EndFlockSize, breaks = c(0, 18000, 29000, 100000), labels = c("<18000", "18000-29000", ">29000"), include.lowest = TRUE),
+    NumberOfHousesGroup = cut(NumberOfHouses, breaks = c(0, 1.1, 2.1, 3.1, 100), labels = c("1", "2", "3", ">3"), include.lowest = TRUE),
+    Year_Quarter = factor(paste0(HatchYear, "-", HatchQuarter)),
+    HatchYear = factor(HatchYear),
+    HatchQuarter = factor(HatchQuarter),
+    logFlockSize = log(EndFlockSize),
+    FlockSize = EndFlockSize,
+    EndFlockSize_scaled = scale(EndFlockSize),
+    PoultryFarmDensity_scaled = scale(PoultryFarmDensity),
+    # Mortality = round(Mortality, digits = 1),
+    # MortalityProportion = Mortality/100,
+    TotalDead = as.integer(round((Mortality/100)*FlockSize, 0)),
+    StartFlockSize = as.integer(round(FlockSize/(1-(Mortality/100)), 0)),
+    logStartFlockSize = log(StartFlockSize),
+    StartFlockSize_scaled = scale(StartFlockSize),
+    Type2 = car::recode(Type, "c('medium', 'slow-growing')='MED+SLOW'")
+  )
+```
+
+
+```{r}
+%md
+#Descriptive statistics
+```
+
+
+```{r}
+test = m_AnalysisData %>%
+  dplyr::mutate(
+    MortGroup = cut(Mortality, breaks = c(0, 3, 5, 10, 15), labels = c("0-3%", "3-5%", "5-10%", "10-15%"), include.lowest = TRUE),
+  )
+
+table(test$MortGroup, test$Antibiotics, test$Type)
+```
+
+
+```{r}
+prop.table(table(test$MortGroup, test$Antibiotics, test$Type), m= 2)
+```
+
+
+```{r}
+table(m_AnalysisData$HatchYear, m_AnalysisData$Type)
+```
+
+
+```{r}
+Slow = m_AnalysisData %>% dplyr::filter(Type == 'slow-growing')
+Med = m_AnalysisData %>% dplyr::filter(Type == 'medium')
+Conv = m_AnalysisData %>% dplyr::filter(Type == 'conventional')
+```
+
+
+```{r}
+m_AnalysisData %>% dplyr::group_by(Type) %>% dplyr::summarize(n = dplyr::n_distinct(FarmIdentification))
+```
+
+
+```{r}
+# For number of houses on farm level:
+
+farmAllYears = m_AnalysisData %>% dplyr::group_by(Type, FarmIdentification, HatchYear) %>% dplyr::summarise (NumberOfHouses = mean(NumberOfHouses))
+farmAllYears %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(NumberOfHouses, prob=c(.25)),
+                   median = quantile(NumberOfHouses, prob=c(.5)),
+                   Q3 = quantile(NumberOfHouses, prob=c(.75)))
+```
+
+
+```{r}
+# For density on farm level:
+
+farmAllYears = m_AnalysisData %>% dplyr::group_by(Type, FarmIdentification, HatchYear) %>% dplyr::summarise (dens = mean(PoultryFarmDensity))
+farmAllYears %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(dens, prob=c(.25)),
+                   median = quantile(dens, prob=c(.5)),
+                   Q3 = quantile(dens, prob=c(.75)))
+```
+
+
+```{r}
+print(
+  paste(
+    'Total:', round((nrow(m_AnalysisData %>% dplyr::filter(AntibioticsAfterWeek1 == 1)) / nrow(m_AnalysisData))*100, 1), '%',
+    'Conv:', round((nrow(Conv %>% dplyr::filter(AntibioticsAfterWeek1 == 1)) / nrow(Conv))*100, 1), '%',
+    'Med:', round((nrow(Med %>% dplyr::filter(AntibioticsAfterWeek1 == 1)) / nrow(Med))*100, 1), '%',
+    'Slow:', round((nrow(Slow %>% dplyr::filter(AntibioticsAfterWeek1 == 1)) / nrow(Slow))*100, 1), '%'
+  )
+)
+
+# "Total: 15.2 % Conv: 23.1 % Slow: 5 %"
+```
+
+
+```{r}
+print(
+  paste(
+    'Total:', round((nrow(m_AnalysisData %>% dplyr::filter(Thinning == 1)) / nrow(m_AnalysisData))*100, 1), '%',
+    'Conv:', round((nrow(Conv %>% dplyr::filter(Thinning == 1)) / nrow(Conv))*100, 1), '%',
+    'Slow:', round((nrow(Slow %>% dplyr::filter(Thinning == 1)) / nrow(Slow))*100, 1), '%'
+  )
+)
+```
+
+
+```{r}
+print(
+  paste(
+    'Total:', round((nrow(m_AnalysisData %>% dplyr::filter(OnFarmHatching == 1)) / nrow(m_AnalysisData))*100, 1), '%',
+    'Conv:', round((nrow(Conv %>% dplyr::filter(OnFarmHatching == 1)) / nrow(Conv))*100, 1), '%',
+    'Slow:', round((nrow(Slow %>% dplyr::filter(OnFarmHatching == 1)) / nrow(Slow))*100, 1), '%'
+  )
+)
+```
+
+
+```{r}
+m_AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(Mortality, prob=c(.25)),
+                   median = quantile(Mortality, prob=c(.5)),
+                   Q3 = quantile(Mortality, prob=c(.75)))
+```
+
+
+```{r}
+m_AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(FlockSize, prob=c(.25)),
+                   median = quantile(FlockSize, prob=c(.5)),
+                   Q3 = quantile(FlockSize, prob=c(.75)))
+```
+
+
+```{r}
+m_AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(NumberOfHouses, prob=c(.25)),
+                   median = quantile(NumberOfHouses, prob=c(.5)),
+                   Q3 = quantile(NumberOfHouses, prob=c(.75)))
+```
+
+
+```{r}
+m_AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(MeanAgeAtSlaughter, prob=c(.25)),
+                   median = quantile(MeanAgeAtSlaughter, prob=c(.5)),
+                   Q3 = quantile(MeanAgeAtSlaughter, prob=c(.75)))
+```
+
+
+```{r}
+m_AnalysisData %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(Q1 = quantile(PoultryFarmDensity, prob=c(.25)),
+                   median = quantile(PoultryFarmDensity, prob=c(.5)),
+                   Q3 = quantile(PoultryFarmDensity, prob=c(.75)))
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+m_AnalysisData %>%
+    ggplot2::ggplot(ggplot2::aes(x = factor(Year_Quarter), y = Mortality, group = Type, color = Type)) +
+    ggplot2::stat_summary(geom = "line", fun = "mean", size = 2) + 
+    ggplot2::labs(
+        x = "Year-Quarter", 
+        y="Mortality"
+    ) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5, size = 18),
+      axis.title.x = ggplot2::element_text(size = 15),
+      axis.text= ggplot2::element_text(size=15),
+      axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+      axis.title.y = ggplot2::element_text(size = 15),
+      legend.position = c(0.2, 0.6),
+      legend.title = ggplot2::element_text(size=0),
+      legend.text = ggplot2::element_text(size=15)
+    ) +
+    ggplot2::labs(color = "the legend")
+```
+
+
+```{r}
+%md
+## Relationships between variables
+```
+
+
+```{r}
+par(mfrow = c(2,1))
+hist(m_AnalysisData$Mortality[m_AnalysisData$Type == "conventional"])
+hist(m_AnalysisData$Mortality[m_AnalysisData$Type == "slow-growing"])
+```
+
+
+```{r}
+par(mfrow = c(2,2))
+boxplot(m_AnalysisData$Mortality ~ m_AnalysisData$Antibiotics)
+boxplot(m_AnalysisData$Mortality ~ m_AnalysisData$Type)
+boxplot(m_AnalysisData$Mortality ~ m_AnalysisData$NumberOfHousesGroup)
+boxplot(m_AnalysisData$Mortality ~ m_AnalysisData$HatchQuarter)
+```
+
+
+```{r}
+%md
+## Univariate analyses
+```
+
+
+```{r}
+model0 = glmmTMB::glmmTMB(TotalDead ~ 1 + offset(log(StartFlockSize)) + (1|Farm) + (1|Vet),
+                 data = m_AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+```
+
+
+```{r}
+Vars = as.list(c(
+                "NumberOfHouses",
+                "Type",
+                "BreedGroup",
+                "OnFarmHatching",
+                "HatchYear",
+                "HatchQuarter",
+                "Thinning",
+                "EndFlockSize",
+                "log(EndFlockSize)",
+                "log(StartFlockSize)",
+                "StartFlockSize",
+                "PoultryFarmDensity",
+                "NumberOfHousesGroup",
+                "Antibiotics"
+))
+
+allModelsList = lapply(paste("TotalDead ~", Vars, "+ offset(log(StartFlockSize)) + (1|Farm) + (1|Vet)"), as.formula)
+allModelsResults = lapply(allModelsList, 
+                          function(x) glmmTMB::glmmTMB(x, 
+                                                       data = m_AnalysisData,
+                                                       family = glmmTMB::nbinom2,
+                                                       control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                                                      )
+                          )
+allModelsAIC = lapply(allModelsResults, AIC)
+```
+
+
+```{r}
+# to compare log values:
+
+Vars = as.list(c(
+                "EndFlockSize",
+                "log(FlockSize)",
+                "log(StartFlockSize)",
+                "StartFlockSize_scaled"
+))
+
+allModelsList = lapply(paste("TotalDead ~", Vars, "+ offset(log(StartFlockSize)) + (1|Farm) + (1|Vet)"), as.formula)
+allModelsResults = lapply(allModelsList, 
+                          function(x) glmmTMB::glmmTMB(x, 
+                                                       data = m_AnalysisData,
+                                                       family = glmmTMB::nbinom2,
+                                                       control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                                                      )
+                          )
+allModelsAIC = lapply(allModelsResults, AIC)
+```
+
+
+```{r}
+allModelsDeltaAIC = lapply(allModelsAIC, function(x) round(x - AIC(model0)))
+
+DeltaAICDf = as.data.frame(do.call(rbind, allModelsDeltaAIC))
+colnames(DeltaAICDf)[1] = "DeltaAIC"
+
+VarsDf = as.data.frame(do.call(rbind, Vars))
+colnames(VarsDf)[1] = "Variable"
+
+CompleteDf = cbind(VarsDf, DeltaAICDf)
+CompleteDf = CompleteDf[order(CompleteDf$DeltaAIC),]
+CompleteDf$Variable <- factor(CompleteDf$Variable, levels = CompleteDf$Variable)                          
+CompleteDf
+```
+
+
+```{r}
+model1.1 = glmmTMB::glmmTMB(TotalDead ~ Type + offset(log(StartFlockSize)) + (1|Farm) + (1|Vet),
+                 data = m_AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+```
+
+
+```{r}
+anova(model1.1, model0)
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(model1.1, revpairwise ~ Type, offset = 0, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+model1.2 = glmmTMB::glmmTMB(TotalDead ~ EndFlockSize_scaled + offset(log(StartFlockSize)) + (1|Farm) + (1|Vet),
+                 data = m_AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+
+AIC(model1.2)
+```
+
+
+```{r}
+model1.3 = glmmTMB::glmmTMB(TotalDead ~ log(FlockSize) + offset(log(StartFlockSize)) + (1|Farm) + (1|Vet),
+                 data = m_AnalysisData,
+                 family = glmmTMB::nbinom2,
+                 control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3))
+                )
+
+AIC(model1.3)
+```
+
+
+```{r}
+%md
+# Backwards stepwise selection
+```
+
+
+```{r}
+model_nb_tmb1 = glmmTMB::glmmTMB(TotalDead ~ 
+                         StartFlockSize_scaled +
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         PoultryFarmDensity +
+                         offset(log(StartFlockSize)) +
+                         (1|Farm) + (1|Vet), 
+                         data = m_AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+drop1(model_nb_tmb1)
+```
+
+
+```{r}
+model_nb_tmb2 = glmmTMB::glmmTMB(TotalDead ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         PoultryFarmDensity +
+                         offset(log(StartFlockSize)) +
+                         (1|Farm) + (1|Vet), 
+                         data = m_AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+drop1(model_nb_tmb2)
+```
+
+
+```{r}
+model_nb_tmb3 = glmmTMB::glmmTMB(TotalDead ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         offset(log(StartFlockSize)) +
+                         (1|Farm) + (1|Vet), 
+                         data = m_AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+drop1(model_nb_tmb3, test = "Chisq")
+```
+
+
+```{r}
+performance::check_collinearity(model_nb_tmb3)
+```
+
+
+```{r}
+save(model_nb_tmb3, file = "model_nb_tmb3.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/model_nb_tmb3.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+summary(model_nb_tmb3)
+```
+
+
+```{r}
+model_nb_tmb3_2 = glmmTMB::glmmTMB(TotalDead ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         Type * HatchYear +
+                         offset(log(StartFlockSize)) +
+                         (1|Farm) + (1|Vet), 
+                         data = m_AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+AIC(model_nb_tmb3_2) - AIC(model_nb_tmb3) 
+```
+
+
+```{r}
+model_nb_tmb3_3 = glmmTMB::glmmTMB(TotalDead ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         Thinning +
+                         NumberOfHousesGroup +
+                         Type * HatchYear +
+                         Type * Thinning +
+                         offset(log(StartFlockSize)) +
+                         (1|Farm) + (1|Vet), 
+                         data = m_AnalysisData,
+                         family = glmmTMB::nbinom2,
+                         control = glmmTMB::glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+```
+
+
+```{r}
+AIC(model_nb_tmb3_3) - AIC(model_nb_tmb3_2) 
+```
+
+
+```{r}
+FinalModel_mort = model_nb_tmb3_2
+save(FinalModel_mort, file = "FinalModel_mort.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/FinalModel_mort.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+%md
+# Results
+```
+
+
+```{r}
+dbutils.fs.cp ("dbfs:/tmp/FinalModel_mort.rda", paste("file:", getwd(), sep=""))
+```
+
+
+```{r}
+load(file = paste(getwd(),"/FinalModel_mort.rda", sep=""))
+```
+
+
+```{r}
+summary(FinalModel_mort)
+```
+
+
+```{r}
+# rate ratios:
+ls = lsmeans::lsmeans(FinalModel_mort, revpairwise ~ Type|HatchYear, type = "response", offset = 0)
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Palette2 <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+Palette5 <- c('#000000','#f58231',"#4363d8") # suitable for color, black-white and color blindness
+```
+
+
+```{r}
+pointsize = 3
+linesize = 1
+lettersize = 4
+
+#least-square means mortality rates per group:
+ls_type <- lsmeans::lsmeans(FinalModel_mort, ~ Type|HatchYear, offset = 0)
+
+ls_type_cld <- multcomp::cld(object = ls_type,
+                       adjust = "Tukey",
+                       Letters = letters,
+                       alpha = 0.05,
+                       type = "response",
+                       decreasing = TRUE)
+
+plot2 <- ls_type_cld %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(HatchYear), y = response, group = Type, color = Type)) +
+  ggplot2::geom_line(linewidth = linesize)+  
+  ggplot2::geom_point(
+    ggplot2::aes(shape = Type),
+    size = pointsize
+  ) +
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+    width=.7,
+    position = ggplot2::position_dodge(0.2)
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='conventional',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = 0.2),  
+    size = lettersize,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='medium',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = -1),
+    position = ggplot2::position_nudge(x = -0.2),  
+    size = lettersize,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    data=ls_type_cld[ls_type_cld$Type=='slow-growing',],
+    ggplot2::aes(label = gsub(" ", "", .group), vjust = 1.5),
+    position = ggplot2::position_nudge(x = 0.2),  
+    size = lettersize,
+    show.legend = FALSE
+  ) +
+  ggplot2::labs(
+      y="Mortality rate"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 15),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=15),
+    axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position = c(0.2, 0.2)
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0,0.04)
+  ) +
+  ggplot2::scale_color_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_shape_manual(values = c(16,15,17), labels=c('CONV', 'MED', 'SLOW')) +
+  ggplot2::scale_fill_manual(values=Palette5, labels=c('CONV', 'MED', 'SLOW'))
+```
+
+
+```{r}
+gridExtra::grid.arrange(plot2_r, plot2, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_mort, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_mort, trt.vs.ctrl ~ HatchYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_mort, revpairwise ~ NumberOfHousesGroup, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+lsmeans_Houses <- lsmeans::lsmeans(FinalModel_mort, ~ NumberOfHousesGroup, lmer.df = "asymp", type = "response", offset = 0)
+
+plotHouses <- summary(lsmeans_Houses) %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(NumberOfHousesGroup), y = lsmean)) +
+  ggplot2::geom_bar(stat="identity",
+                   position = "dodge",
+                   fill = "#0D4678",
+                   alpha = 0.7) +  
+  ggplot2::geom_errorbar(ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+                         width=.2, 
+                         position = ggplot2::position_dodge(.9)) +
+  ggplot2::labs(
+      x = "Number of houses", 
+      y="Mortality rate"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+      axis.title.x = ggplot2::element_text(size = 15),
+      axis.text= ggplot2::element_text(size=15),
+      axis.title.y = ggplot2::element_text(size = 15)
+  ) +
+  ggplot2::scale_y_continuous(limits = c(0.0, 0.04), labels = scales::percent)
+
+  gridExtra::grid.arrange(plotHouses, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+sum = summary(FinalModel_mort)
+exp_b = round(exp(sum$coefficients$cond[-1,1]), 2)
+CI = round(exp(confint(FinalModel_mort, method = "Wald")[-1,1:2]), 2)
+Mort_exp_b_CI = cbind(exp_b,CI)
+Mort_exp_b_CI
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel_mort, revpairwise ~ HatchQuarter, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+lsmeans_q <- lsmeans::lsmeans(FinalModel_mort, ~ HatchQuarter, lmer.df = "asymp", type = "response", offset = 0)
+
+summary(lsmeans_q) %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(HatchQuarter), y = lsmean)) +
+  ggplot2::geom_bar(stat="identity",
+                   position = "dodge") +  
+  ggplot2::geom_errorbar(ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+                         width=.2, 
+                         position = ggplot2::position_dodge(.9)) +
+  ggplot2::labs(
+      title = "Hatch quarter", 
+      y="Mortality rate"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 18),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=14),
+    axis.title.y = ggplot2::element_text(size = 14)
+  )
+```
+
+
+```{r}
+lsmeans_t <- lsmeans::lsmeans(FinalModel_mort, revpairwise ~ Thinning, lmer.df = "asymp", type = "response", offset = 0)
+summary(lsmeans_t, infer = TRUE)
+```
+
+
+```{r}
+%md
+#Relationship between antibiotic use and mortality
+```
+
+
+```{r}
+Data_ab_mort = m_AnalysisData %>%
+  dplyr::mutate(
+    Type = factor(car::recode(Type, "c('medium', 'slow-growing')='MED + SLOW'")),
+    MortalityGroup = cut(Mortality, breaks = c(0, 1.7, 2.5, 3.5, 8, 15), labels = c("<1.7%", "1.7-2.5%", "2.5-3.5%", "3.5-8%", ">8%"), include.lowest = TRUE),
+    MortalityGroup2 = cut(Mortality, breaks = c(0, 2.5, 5, 7.5, 10, 12.5, 15), labels = c("0-2.5", "2.5-5", "5-7.5", "7.5-10", "10-12.5", "12.5-15"), include.lowest = TRUE))
+```
+
+
+```{r}
+ggplot2::ggplot(data = Data_ab_mort, ggplot2::aes(x = MortalityGroup, y = Antibiotics, fill = Type)) +
+ggplot2::geom_bar(stat="summary",
+                   position = "dodge",
+                   alpha = 0.6) +
+ggplot2::theme_classic()
+```
+
+
+```{r}
+fun1 = lme4::glmer(Antibiotics ~ Mortality + HatchYear + HatchQuarter + Type + NumberOfHousesGroup + logFlockSize + (1|Farm) + (1|Vet), 
+  data = Data_ab_mort,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+```
+
+
+```{r}
+fun2 = lme4::glmer(Antibiotics ~ Mortality + HatchYear + HatchQuarter + Type + NumberOfHousesGroup + logFlockSize + Mortality*Type + HatchYear*Type + (1|Farm) + (1|Vet), 
+  data = Data_ab_mort,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+```
+
+
+```{r}
+#best
+fun3 = lme4::glmer(Antibiotics ~ Mortality + HatchYear + HatchQuarter + Type + NumberOfHousesGroup + logFlockSize + HatchYear*Type + (1|Farm) + (1|Vet), 
+  data = Data_ab_mort,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+```
+
+
+```{r}
+AIC(fun3) - AIC(fun2)
+```
+
+
+```{r}
+save(fun3, file = "fun3.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/fun3.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+eff <- as.data.frame(lsmeans::lsmeans(
+  fun3, ~ Mortality|Type, offset = 0, rg.limit = 1000000,
+  at = list(Mortality = seq(0, 15, 0.1))
+))
+
+# we get estimated marginal means on link-scale, 
+# so get link-inverse function to back-transform to probabilities
+linv <- insight::link_inverse(fun3)
+eff$lsmean <- linv(eff$lsmean)
+eff$asymp.LCL <- linv(eff$asymp.LCL)
+eff$asymp.UCL <- linv(eff$asymp.UCL)
+
+plot_mort_ab <- ggplot2::ggplot(eff, ggplot2::aes(x = Mortality, y = lsmean, group = Type, color = Type)) + 
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = Type), alpha = .2, color = NA) +
+  ggplot2::geom_line(size = 2) +
+  ggplot2::theme_classic() +
+  ggplot2::labs(
+      x= "Mortality (%)",
+      y="Probability of treatment" 
+  ) +
+  ggplot2::theme(
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text.x= ggplot2::element_text(size=0),
+    axis.text.y= ggplot2::element_text(size=15),
+    axis.title.y = ggplot2::element_text(size = 15),
+    legend.title = ggplot2::element_text(size=0),
+    legend.text = ggplot2::element_text(size=12),
+    legend.position=c(.25,.9)
+  ) +
+  ggplot2::scale_y_continuous(labels = scales::percent) +
+  ggplot2::scale_color_manual(values= Palette5, labels=c('CONV', 'MED+SLOW')) +
+  ggplot2::scale_fill_manual(values= Palette5, labels=c('CONV', 'MED+SLOW')) +
+  ggplot2::coord_fixed(ratio=10)
+
+gridExtra::grid.arrange(plot_mort_ab, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+summary(fun3)
+```
+
+
+```{r}
+dens_plot <- ggplot2::ggplot(data = m_AnalysisData) +
+  ggplot2::geom_density(
+    ggplot2::aes(x = Mortality, y = ..scaled.., group = Type2, fill = Type2, color = Type2),
+    alpha = .5
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::labs(
+      x= "Mortality (%)",
+      y="Density"
+  ) +
+  ggplot2::theme(
+    legend.position= "none",
+    axis.title.x = ggplot2::element_text(size = 15),
+    axis.text= ggplot2::element_text(size=15),
+    axis.title.y = ggplot2::element_text(size = 15, margin = ggplot2::margin(0,35,0,0))
+  ) +
+  ggplot2::scale_y_continuous(breaks = c(0, 1)) +
+  ggplot2::scale_linetype_manual(values = c(1, 2), labels=c('CONV', 'MED + SLOW')) +
+  ggplot2::scale_color_manual(values = Palette5, labels=c('CONV', 'MED + SLOW')) +
+  ggplot2::scale_fill_manual(values = Palette5, labels=c('CONV', 'MED + SLOW')) +
+  ggplot2::coord_fixed(ratio=3)
+
+gridExtra::grid.arrange(dens_plot, ncol = 2, respect = TRUE)
+```
+
+
+```{r}
+car::vif(fun3)
+```
+
+
+```{r}
+emmeans::emtrends(fun3, pairwise ~ Type, var = "Mortality", infer = TRUE)
+# type = reponse doesnt do anything
+```
+
+
+```{r}
+emmeans::emtrends(fun2, pairwise ~ Type, var = "Mortality", infer = TRUE)
+# type = reponse doesnt do anything
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(fun3, revpairwise ~ Type|Mortality, type = "response")
+summary(ls, infer=TRUE, type = "response")
+```
+

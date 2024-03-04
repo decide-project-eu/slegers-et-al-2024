@@ -1,0 +1,464 @@
+
+---
+title: "Analysis Slow-growing - AB WK1"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+library(sparklyr)
+
+# create a sparklyr connection
+sc <- spark_connect(method = "databricks")
+```
+
+
+```{r}
+%scala
+spark.sparkContext.hadoopConfiguration.set(
+  "<directory>",
+  "<key>"
+)
+```
+
+
+```{r}
+dfFinalDataset <- spark_read_csv(sc,
+                                 "wasbs://decide@decide.blob.core.windows.net/poultry/nl/data_avinet/dfFinalDataset.csv",
+                                 memory = FALSE,
+                                 header = TRUE)
+```
+
+
+```{r}
+%md
+
+# First week antibiotics
+```
+
+
+```{r}
+f_AnalysisData <- dfFinalDataset %>%
+  dplyr::select(
+    FarmIdentification, 
+    Pen, 
+    Flock, 
+    VetId,
+    Antibiotics,
+    AntibioticsWeek1,
+    NumberOfHouses,
+    Type,
+    Patio,
+    OnFarmHatching,
+    HatchYear,
+    HatchQuarter,
+    Thinning,
+    EndFlockSize,
+    PoultryFarmDensity
+  ) %>%
+  collect() %>%
+  dplyr::filter(
+    Type != "free range and organic",
+    Patio == 0
+  ) %>%
+  na.omit() %>%
+  dplyr::mutate(
+    Farm = factor(FarmIdentification),
+    Pen = factor(Pen),
+    Flock = factor(Flock),
+    Vet = factor(VetId),
+    Type = relevel(factor(Type), ref = "conventional"),
+    NumberOfHousesGroup = cut(NumberOfHouses, breaks = c(0, 1.1, 2.1, 3.1, 100), labels = c("1", "2", "3", ">3"), include.lowest = TRUE),
+    HatchYear = factor(HatchYear),
+    HatchQuarter = factor(HatchQuarter),
+    logFlockSize = log2(EndFlockSize),
+    EndFlockSize_scaled = scale(EndFlockSize),
+    PoultryFarmDensity_scaled = scale(PoultryFarmDensity),
+    AntibioticsWeek1 = factor(AntibioticsWeek1)
+  )
+```
+
+
+```{r}
+%md
+## Univariate models
+```
+
+
+```{r}
+f_model0.1 = lme4::glmer(AntibioticsWeek1 ~ 1 + (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+
+AIC(f_model0.1)
+```
+
+
+```{r}
+# AIC of univariate models in one graph.
+# Note: this is not used for variable selection. All variables are included in backwards selection because of possible confounding.
+
+Vars = as.list(c(
+                "NumberOfHousesGroup",
+                "Type",
+                "OnFarmHatching",
+                "HatchYear",
+                "HatchQuarter",
+                "Thinning",
+                "logFlockSize",
+                "PoultryFarmDensity"
+))
+
+allModelsList = lapply(paste("AntibioticsWeek1 ~", Vars, "+ (1|Farm) + (1|Vet)"), as.formula)
+allModelsResults = lapply(allModelsList, function(x) lme4::glmer(x,
+                                                                data = f_AnalysisData,
+                                                                 family = binomial,
+                                                               control= lme4::glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000))))
+allModelsAIC = lapply(allModelsResults, AIC)
+```
+
+
+```{r}
+allModelsDeltaAIC = lapply(allModelsAIC, function(x) round(x - AIC(f_model0.1)))
+
+DeltaAICDf = as.data.frame(do.call(rbind, allModelsDeltaAIC))
+colnames(DeltaAICDf)[1] = "DeltaAIC"
+
+VarsDf = as.data.frame(do.call(rbind, Vars))
+colnames(VarsDf)[1] = "Variable"
+
+CompleteDf = cbind(VarsDf, DeltaAICDf)
+CompleteDf = CompleteDf[order(CompleteDf$DeltaAIC),]
+CompleteDf$Variable <- factor(CompleteDf$Variable, levels = CompleteDf$Variable)                          
+                           
+ggplot2::ggplot(data=CompleteDf, ggplot2::aes(x=Variable, y=DeltaAIC)) +
+  ggplot2::geom_bar(stat="identity") +
+  ggplot2::coord_flip() +
+  ggplot2::theme_light()
+```
+
+
+```{r}
+CompleteDf
+```
+
+
+```{r}
+# A log transformation seems to fit the curve in the data better.
+
+f_model0.2 = lme4::glmer(AntibioticsWeek1 ~ logFlockSize + (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+
+AIC(f_model0.2)-AIC(f_model0.1)
+```
+
+
+```{r}
+f_model0_3 = lme4::glmer(AntibioticsWeek1 ~ Type + (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+                              
+AIC(f_model0_3)-AIC(f_model0.1)
+```
+
+
+```{r}
+AIC(f_model0_3)-AIC(f_model0.1)
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(f_model0_3, revpairwise ~ Type, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+%md
+## Backwards stepwise selection
+```
+
+
+```{r}
+f_model1_0 = lme4::glmer(AntibioticsWeek1 ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         NumberOfHousesGroup +
+                         logFlockSize +
+                         Thinning +
+                         PoultryFarmDensity_scaled +
+                         (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+```
+
+
+```{r}
+drop1(f_model1_0)
+```
+
+
+```{r}
+f_model1_1 = lme4::glmer(AntibioticsWeek1 ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         NumberOfHousesGroup +
+                         logFlockSize +
+                         Thinning +
+                         (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+
+drop1(f_model1_1, test = "Chisq")
+```
+
+
+```{r}
+f_model1_2 = lme4::glmer(AntibioticsWeek1 ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         NumberOfHousesGroup +
+                         logFlockSize +
+                         (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+
+drop1(f_model1_2, test = "Chisq")
+```
+
+
+```{r}
+save(f_model1_2, file = "f_model1_2.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/f_model1_2.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+dbutils.fs.cp ("dbfs:/tmp/f_model1_2.rda", paste("file:", getwd(), sep=""))
+```
+
+
+```{r}
+load(file = paste(getwd(),"/f_model1_2.rda", sep=""))
+```
+
+
+```{r}
+%md
+## Interactions
+```
+
+
+```{r}
+f_model2_2 = lme4::glmer(AntibioticsWeek1 ~ 
+                         Type +
+                         HatchYear +
+                         HatchQuarter +
+                         NumberOfHousesGroup +
+                         logFlockSize +
+                         Type * HatchYear +
+                         (1|Farm) + (1|Vet), 
+  data = f_AnalysisData,
+  family = binomial,
+  control= lme4::glmerControl(optimizer="bobyqa",  #bobyqa should be the default optimiser
+                              optCtrl=list(maxfun=100000)))
+```
+
+
+```{r}
+ss <- lme4::getME(f_model2_2,c("theta","fixef"))
+f_model2_2 <- update(f_model2_2,start=ss)
+```
+
+
+```{r}
+AIC(f_model2_2)
+```
+
+
+```{r}
+f_model_new <- f_model2_2
+```
+
+
+```{r}
+save(f_model_new, file = "f_model_new.rda")
+```
+
+
+```{r}
+dbutils.fs.cp (paste("file:", getwd(),"/f_model_new.rda", sep=""), "dbfs:/tmp")
+```
+
+
+```{r}
+%md
+## Results
+```
+
+
+```{r}
+dbutils.fs.cp ("dbfs:/tmp/f_model_new.rda", paste("file:", getwd(), sep=""))
+```
+
+
+```{r}
+load(file = paste(getwd(),"/f_model_new.rda", sep=""))
+```
+
+
+```{r}
+FinalModel = f_model_new
+```
+
+
+```{r}
+summary(FinalModel)
+```
+
+
+```{r}
+ls_type = lsmeans::lsmeans(FinalModel, revpairwise ~ Type, type = "response")
+summary(ls_type, infer = TRUE)$contrasts
+```
+
+
+```{r}
+lsmeans_type <- lsmeans::lsmeans(FinalModel, revpairwise ~ Type|HatchYear, type = "response")
+summary(lsmeans_type, infer = TRUE)$contrasts
+```
+
+
+```{r}
+sum = summary(FinalModel)
+OR = round(exp(sum$coefficients[-1, 1]), 2)
+CI = round(exp(confint(FinalModel, method = "Wald"))[-(1:3),], 2)
+Mort_OR_CI = cbind(OR,CI)
+Mort_OR_CI
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel, revpairwise ~ NumberOfHousesGroup, type = "response")
+summary(ls, infer= TRUE)$contrasts
+```
+
+
+```{r}
+lsmeans_pens <- lsmeans::lsmeans(FinalModel, ~ NumberOfHousesGroup, lmer.df = "asymp", type = "response")
+
+summary(lsmeans_pens) %>%
+  ggplot2::ggplot(ggplot2::aes(x = factor(NumberOfHousesGroup), y = lsmean)) +
+  ggplot2::geom_bar(stat="identity",
+                   position = "dodge") +  
+  ggplot2::geom_errorbar(ggplot2::aes(ymin=asymp.LCL, ymax=asymp.UCL), 
+                         width=.2, 
+                         position = ggplot2::position_dodge(.9)) +
+  ggplot2::labs(
+      title = "Number of pens", 
+      y="Probability of antibiotics"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, size = 18),
+    axis.title.x = ggplot2::element_text(size = 0),
+    axis.text= ggplot2::element_text(size=14),
+    axis.title.y = ggplot2::element_text(size = 14)
+  )
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel, revpairwise ~ HatchQuarter, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+ls = lsmeans::lsmeans(FinalModel, trt.vs.ctrl ~ HatchYear, type = "response")
+summary(ls, infer = TRUE)$contrasts
+```
+
+
+```{r}
+eff <- as.data.frame(lsmeans::lsmeans(
+  FinalModel, ~ logFlockSize, rg.limit = 1000000,
+  at = list(logFlockSize = seq(4.3, 16.3, 0.5))
+))
+
+# own addition:
+# change EndFlockSizes to unscaled EndFlockSize, and retain the rest of the dataframe (odds and SE)
+eff$EndFlockSize <- 2^(eff$logFlockSize)
+
+# we get estimated marginal means on link-scale, 
+# so get link-inverse function to back-transform to probabilities
+linv <- insight::link_inverse(FinalModel)
+eff$lsmean <- linv(eff$lsmean)
+eff$asymp.LCL <- linv(eff$asymp.LCL)
+eff$asymp.UCL <- linv(eff$asymp.UCL)
+
+ggplot2::ggplot(eff, ggplot2::aes(x = EndFlockSize, y = lsmean)) + 
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = .1) +
+  ggplot2::geom_line() +
+  ggplot2::theme_classic() +
+  ggplot2::labs(
+      title = "Flock size", 
+      y="Probability of antibiotics after first week"
+  ) +
+  ggplot2::scale_y_continuous(limits = c(0, 0.075)) +
+  ggplot2::theme(text = ggplot2::element_text(size = 20))
+```
+
+
+```{r}
+eff <- as.data.frame(lsmeans::lsmeans(
+  FinalModel, ~ logFlockSize|Type, rg.limit = 1000000,
+  at = list(logFlockSize = seq(4.3, 16.3, 0.5))
+))
+
+# own addition:
+# change EndFlockSizes to unscaled EndFlockSize, and retain the rest of the dataframe (odds and SE)
+eff$EndFlockSize <- 2^(eff$logFlockSize)
+
+# we get estimated marginal means on link-scale, 
+# so get link-inverse function to back-transform to probabilities
+linv <- insight::link_inverse(FinalModel)
+eff$lsmean <- linv(eff$lsmean)
+eff$asymp.LCL <- linv(eff$asymp.LCL)
+eff$asymp.UCL <- linv(eff$asymp.UCL)
+
+ggplot2::ggplot(eff, ggplot2::aes(x = EndFlockSize, y = lsmean, group = factor(Type), color = factor(Type))) + 
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = .1) +
+  ggplot2::geom_line() +
+  ggplot2::theme_classic() +
+  ggplot2::labs(
+      title = "Flock size", 
+      y="Probability of antibiotics"
+  ) +
+  ggplot2::scale_y_continuous(limits = c(0, 0.2)) +
+  ggplot2::theme(text = ggplot2::element_text(size = 20),
+                  legend.position=c(.8,.9))
+```
+
