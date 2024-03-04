@@ -39,7 +39,7 @@ install.packages("lsmeans")
 
 ```{r}
 dfFinalDataset <- spark_read_csv(sc,
-                                 "wasbs://decide@decide.blob.core.windows.net/poultry/nl/data_avinet/dfFinalDataset.csv",
+                                 "//dfFinalDataset.csv",
                                  memory = FALSE,
                                  header = TRUE)
 
