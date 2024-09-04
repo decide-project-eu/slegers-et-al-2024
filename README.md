@@ -24,16 +24,16 @@ All statistical analyses were performed using R version 4.2.2, also in Databrick
 - ggsignif (optional)
 
 ## Data processing scripts
-[Clean CRA data (antibiotics registrations)](data-processing/1_1%20Data%20CRA.ipynb)
-[Clean PMP data (poultry flock monitoring)](data-processing/1_2%20PMP%20data.ipynb)
-[Clean KIP slaughter transport data](data-processing/1_3%20Data%20Slaughter.ipynb)
-[Merge datasets on house level](data-processing/2_1%20Merging%20Events.ipynb)
-[Create flocks and select flocks for final dataset](data-processing/2_2%20Create%20flocks%20and%20final%20dataset.ipynb)
+- [Clean CRA data (antibiotics registrations)](data-processing/1_1%20Data%20CRA.ipynb)
+- [Clean PMP data (poultry flock monitoring)](data-processing/1_2%20PMP%20data.ipynb)
+- [Clean KIP slaughter transport data](data-processing/1_3%20Data%20Slaughter.ipynb)
+- [Merge datasets on house level](data-processing/2_1%20Merging%20Events.ipynb)
+- [Create flocks and select flocks for final dataset](data-processing/2_2%20Create%20flocks%20and%20final%20dataset.ipynb)
 
 ## Models
-[Week 1 antibiotic treatments](analysis/Analysis%20Slow-growing%20-%20AB%20WK1.Rmd)
-[Antibiotic treatments after week 1](analysis/Analysis%20Slow-growing%20-%20AB.Rmd)
-[Footpad lesion scores](analysis/Analysis%20Slow-growing%20-%20FPL.Rmd)
-[Mortality](analysis/Analysis%20Slow-growing%20-%20Mort.Rmd)
-[Create graphs with combined results from antibiotic models](analysis/AB%20Plots.Rmd)
+- [Week 1 antibiotic treatments](analysis/Analysis%20Slow-growing%20-%20AB%20WK1.Rmd)
+- [Antibiotic treatments after week 1](analysis/Analysis%20Slow-growing%20-%20AB.Rmd)
+- [Footpad lesion scores](analysis/Analysis%20Slow-growing%20-%20FPL.Rmd)
+- [Mortality](analysis/Analysis%20Slow-growing%20-%20Mort.Rmd)
+- [Create graphs with combined results from antibiotic models](analysis/AB%20Plots.Rmd)
 
